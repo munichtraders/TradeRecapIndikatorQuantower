@@ -1,0 +1,42 @@
+<!--
+  Quantower Indikator
+  Build: dotnet build TradeRecap.csproj -c Release
+  Output geht DIREKT in den Quantower-Indikatorordner (kein manuelles Kopieren nötig):
+    %QuantowerPath%\..\..\Settings\Scripts\Indicators\TradeRecap
+  Nach dem Build reicht "Indikator neu laden" bzw. Quantower-Neustart.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Platforms>AnyCPU</Platforms>
+    <AlgoType>Indicator</AlgoType>
+    <AssemblyName>MunichTraders.TradeRecap</AssemblyName>
+    <RootNamespace>MunichTraders.TradeRecap</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+    <OutputPath>$(QuantowerPath)\..\..\Settings\Scripts\Indicators\TradeRecap</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <OutputPath>$(QuantowerPath)\..\..\Settings\Scripts\Indicators\TradeRecap</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="munich-traders-logo.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="10.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>$(QuantowerPath)\bin\TradingPlatform.BusinessLayer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
