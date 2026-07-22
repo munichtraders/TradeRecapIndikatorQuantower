@@ -90,9 +90,9 @@ public class TradeRecapIndicator : Indicator
     // Fingerprints bereits verschickter Trades — Schutz gegen doppelte Zustellung
     private readonly HashSet<string> _sentTradeKeys = new();
 
-    // Zweites Release am 2026-07-22 — VersionChecker vergleicht als int (r > c),
+    // Drittes Release am 2026-07-22 — VersionChecker vergleicht als int (r > c),
     // deshalb Ziffernanhang statt Buchstabensuffix, um YYMMDD-Schema kompatibel zu halten.
-    private const string CurrentVersion = "2607221";
+    private const string CurrentVersion = "2607222";
 
     // 0 = unbekannt, 1 = verbunden, 2 = Fehler
     private volatile int _tgStatus;
@@ -205,12 +205,17 @@ public class TradeRecapIndicator : Indicator
     {
         try
         {
-            if (Symbol == null || trade.Symbol == null || trade.Symbol.Id != Symbol.Id)
-                return;
+            bool symbolMatch = SymbolMatches(trade.Symbol);
+            bool accountMatch = string.IsNullOrWhiteSpace(AccountIdFilter) ||
+                string.Equals(trade.Account?.Id, AccountIdFilter, StringComparison.OrdinalIgnoreCase);
 
-            if (!string.IsNullOrWhiteSpace(AccountIdFilter) &&
-                !string.Equals(trade.Account?.Id, AccountIdFilter, StringComparison.OrdinalIgnoreCase))
-                return;
+            // Diagnose-Log für jeden empfangenen Fill (Trades sind selten genug, um
+            // hier NICHT nur den ersten Fehler zu loggen wie bei OnUpdate).
+            Log($"TradeAdded: Trade-Symbol={trade.Symbol?.Name ?? "?"} (Id={trade.Symbol?.Id}, Root={trade.Symbol?.Root}) " +
+                $"vs Chart-Symbol={Symbol?.Name ?? "?"} (Id={Symbol?.Id}, Root={Symbol?.Root}) " +
+                $"— SymbolMatch={symbolMatch}, AccountMatch={accountMatch} (Filter='{AccountIdFilter}', Trade-Account={trade.Account?.Id})");
+
+            if (!symbolMatch || !accountMatch) return;
 
             if (trade.Account?.Balance is double bal && bal > 0)
                 _lastAccountBalance = (decimal)bal;
@@ -219,8 +224,23 @@ public class TradeRecapIndicator : Indicator
         }
         catch (Exception ex)
         {
+            LogError(ex, "OnTradeAdded Fehler");
             System.Diagnostics.Debug.WriteLine($"[TradeRecap] OnTradeAdded Fehler: {ex.Message}");
         }
+    }
+
+    // Manche Futures-Charts laufen auf einem Continuous-/Frontmonth-Symbol, dessen Id
+    // sich von der Id des tatsächlich gehandelten Kontrakts unterscheidet — deshalb
+    // zusätzlich über Root vergleichen (z.B. "ES" statt "ES09/26@CME"), falls die reine
+    // Id nicht matcht.
+    private bool SymbolMatches(Symbol? tradeSymbol)
+    {
+        if (Symbol == null || tradeSymbol == null) return false;
+        if (tradeSymbol.Id == Symbol.Id) return true;
+        if (!string.IsNullOrEmpty(tradeSymbol.Root) && !string.IsNullOrEmpty(Symbol.Root) &&
+            string.Equals(tradeSymbol.Root, Symbol.Root, StringComparison.OrdinalIgnoreCase))
+            return true;
+        return false;
     }
 
     // ── Trade abgeschlossen → Karte + Telegram + CSV + Server ────────────

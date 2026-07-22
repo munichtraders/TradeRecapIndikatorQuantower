@@ -4,6 +4,15 @@ Alle Änderungen werden hier dokumentiert. Format: `YYMMDD`.
 
 ---
 
+## [2607222] — 2026-07-22 (Update 3)
+
+### Fix
+- **"Kein Trade offen" trotz laufendem Trade.** `OnTradeAdded` verglich bisher nur `trade.Symbol.Id == Symbol.Id` und verwarf jeden Fill ohne exakten Id-Treffer komplett stillschweigend (kein Log, egal ob Treffer oder nicht). Bei Futures kann der Chart auf einem Continuous-/Frontmonth-Symbol laufen, dessen `Id` sich von der `Id` des tatsächlich gehandelten Kontrakts unterscheidet — der reine Id-Vergleich hat solche Fills nie erfasst.
+- Abgleich läuft jetzt zusätzlich über `Symbol.Root` (z.B. "ES" statt "ES09/26@CME") als Fallback, falls die reine Id nicht matcht.
+- Jeder empfangene Fill wird jetzt geloggt (Trade-Symbol vs. Chart-Symbol, Id, Root, Match-Ergebnis, Account-Abgleich) — damit lässt sich ein zukünftiger Mismatch direkt im Quantower-Log nachvollziehen statt zu raten.
+
+---
+
 ## [2607221] — 2026-07-22 (Update 2)
 
 ### Fix
