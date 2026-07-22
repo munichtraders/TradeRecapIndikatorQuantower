@@ -6,7 +6,12 @@ public static class TelegramSender
 {
     private const string ApiBase = "https://api.telegram.org/bot";
 
-    public static async Task SendPhotoAsync(
+    /// <summary>
+    /// Sendet die Recap-Karte an Telegram. Rückgabe: null bei Erfolg, sonst eine
+    /// Fehlerbeschreibung (auch wenn Bot Token/Chat ID fehlen) — der Aufrufer
+    /// entscheidet, wie/wo das geloggt wird (Plattform-Log, Konsole, etc.).
+    /// </summary>
+    public static async Task<string?> SendPhotoAsync(
         string botToken,
         string chatId,
         byte[] imageBytes,
@@ -14,7 +19,7 @@ public static class TelegramSender
         HttpClient client)
     {
         if (string.IsNullOrWhiteSpace(botToken) || string.IsNullOrWhiteSpace(chatId))
-            return;
+            return "Bot Token oder Chat ID nicht gesetzt";
 
         string url = $"{ApiBase}{botToken}/sendPhoto";
 
@@ -30,12 +35,16 @@ public static class TelegramSender
             if (!response.IsSuccessStatusCode)
             {
                 string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                Console.Error.WriteLine($"[TradeRecap] Telegram Fehler {response.StatusCode}: {body}");
+                string error = $"HTTP {(int)response.StatusCode}: {body}";
+                Console.Error.WriteLine($"[TradeRecap] Telegram Fehler {error}");
+                return error;
             }
+            return null;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[TradeRecap] Telegram Exception: {ex.Message}");
+            return ex.Message;
         }
     }
 

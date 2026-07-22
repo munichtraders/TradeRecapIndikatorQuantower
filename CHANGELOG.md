@@ -4,6 +4,14 @@ Alle Änderungen werden hier dokumentiert. Format: `YYMMDD`.
 
 ---
 
+## [2607221] — 2026-07-22 (Update 2)
+
+### Fix
+- **Telegram-Versand schlug lautlos fehl.** `TelegramSender.SendPhotoAsync` brach bei leerem Bot Token/Chat ID komplett stillschweigend ab, ohne irgendeinen Log-Eintrag — auch die neue Quantower-Log-Anbindung aus [260722] hat das nicht erfasst, weil der Fehlerfall nie eine Exception war. `SendPhotoAsync` und `TradeRecapServerSender.SendAsync` geben jetzt eine Fehlermeldung statt `void`/stillem Abbruch zurück; der Indikator loggt Fehlschläge (leere Zugangsdaten, HTTP-Fehler, Exceptions) jetzt als `Error`-Eintrag im Quantower-Log.
+- **Bot Token + Chat ID als Standardwerte hinterlegt** (analog zu `ServerUrl`/`ServerToken`) — Nutzer-Entscheidung 2026-07-22, bewusst inklusive der bekannten Abwägung, dass beide Werte damit in der öffentlichen Git-Historie dieses Repos landen.
+
+---
+
 ## [260722] — 2026-07-22
 
 ### Fix

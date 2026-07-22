@@ -10,7 +10,11 @@ namespace MunichTraders.TradeRecap;
 /// </summary>
 internal static class TradeRecapServerSender
 {
-    internal static async Task SendAsync(
+    /// <summary>
+    /// Sendet den Trade an den zentralen Server. Rückgabe: null bei Erfolg, sonst
+    /// eine Fehlerbeschreibung (auch wenn Server-URL/Token fehlen).
+    /// </summary>
+    internal static async Task<string?> SendAsync(
         string serverUrl,
         string authToken,
         PositionRecord record,
@@ -19,7 +23,7 @@ internal static class TradeRecapServerSender
         HttpClient client)
     {
         if (string.IsNullOrWhiteSpace(serverUrl) || string.IsNullOrWhiteSpace(authToken))
-            return;
+            return "Server-URL oder Token nicht gesetzt";
 
         var payload = new Dictionary<string, object?>
         {
@@ -62,12 +66,16 @@ internal static class TradeRecapServerSender
             if (!response.IsSuccessStatusCode)
             {
                 string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                Console.Error.WriteLine($"[TradeRecap] Server-Fehler {response.StatusCode}: {body}");
+                string error = $"HTTP {(int)response.StatusCode}: {body}";
+                Console.Error.WriteLine($"[TradeRecap] Server-Fehler {error}");
+                return error;
             }
+            return null;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[TradeRecap] Server-Exception: {ex.Message}");
+            return ex.Message;
         }
     }
 }

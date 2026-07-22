@@ -21,10 +21,10 @@ public class TradeRecapIndicator : Indicator
     // ── Telegram ──────────────────────────────────────────────────────────
 
     [InputParameter("Telegram: Bot Token", 10)]
-    public string BotToken = "";
+    public string BotToken = "7800685401:AAEnsF6E4dtm-4pUO-yjgiRjDQyHvOkoT64";
 
     [InputParameter("Telegram: Chat ID", 11)]
-    public string ChatId = "";
+    public string ChatId = "-4946993985";
 
     // ── Journal ───────────────────────────────────────────────────────────
 
@@ -90,7 +90,9 @@ public class TradeRecapIndicator : Indicator
     // Fingerprints bereits verschickter Trades — Schutz gegen doppelte Zustellung
     private readonly HashSet<string> _sentTradeKeys = new();
 
-    private const string CurrentVersion = "260722";
+    // Zweites Release am 2026-07-22 — VersionChecker vergleicht als int (r > c),
+    // deshalb Ziffernanhang statt Buchstabensuffix, um YYMMDD-Schema kompatibel zu halten.
+    private const string CurrentVersion = "2607221";
 
     // 0 = unbekannt, 1 = verbunden, 2 = Fehler
     private volatile int _tgStatus;
@@ -153,7 +155,7 @@ public class TradeRecapIndicator : Indicator
 
             _ = CheckVersionAsync();
 
-            LogInfo($"OnInit OK — Version {CurrentVersion}, Symbol {Symbol?.Name ?? "?"}");
+            Log($"OnInit OK — Version {CurrentVersion}, Symbol {Symbol?.Name ?? "?"}");
         }
         catch (Exception ex)
         {
@@ -270,17 +272,22 @@ public class TradeRecapIndicator : Indicator
 
                 string caption = TelegramSender.BuildCaption(recordSnapshot, statsSnapshot, traderName);
 
-                await TelegramSender.SendPhotoAsync(botToken, chatId, cardBytes, caption, _httpClient)
+                string? tgError = await TelegramSender.SendPhotoAsync(botToken, chatId, cardBytes, caption, _httpClient)
                     .ConfigureAwait(false);
+                if (tgError != null)
+                    Log($"Telegram-Versand fehlgeschlagen: {tgError}", LoggingLevel.Error);
 
                 _csvWriter.AppendTrade(recordSnapshot, statsSnapshot);
 
-                await TradeRecapServerSender.SendAsync(
+                string? serverError = await TradeRecapServerSender.SendAsync(
                     serverUrl, serverToken, recordSnapshot, statsSnapshot, traderName, _httpClient)
                     .ConfigureAwait(false);
+                if (serverError != null)
+                    Log($"Server-Journal fehlgeschlagen: {serverError}", LoggingLevel.Error);
             }
             catch (Exception ex)
             {
+                LogError(ex, "Fehler beim Senden der Recap-Karte");
                 System.Diagnostics.Debug.WriteLine($"[TradeRecap] Fehler: {ex.Message}");
             }
         });
@@ -505,7 +512,7 @@ public class TradeRecapIndicator : Indicator
         // Zeigt im Quantower-Log, WANN und OB der Indikator sauber entladen wurde —
         // fehlt dieser Eintrag vor einem Verschwinden, war es ein harter Crash statt
         // einer regulären Entfernung (Chart geschlossen, Indikator gelöscht, Neuladen).
-        LogInfo("OnClear aufgerufen — Indikator wird entladen");
+        Log("OnClear aufgerufen — Indikator wird entladen");
 
         try
         {
@@ -529,9 +536,9 @@ public class TradeRecapIndicator : Indicator
 
     // ── Quantower-natives Logging (sichtbar im Quantower-Log-Panel) ───────
 
-    private static void LogInfo(string message)
+    private static void Log(string message, LoggingLevel level = LoggingLevel.System)
     {
-        try { Core.Instance?.Loggers?.Log($"[TradeRecap] {message}", LoggingLevel.System); }
+        try { Core.Instance?.Loggers?.Log($"[TradeRecap] {message}", level); }
         catch { /* Logging darf den Indikator nie zum Absturz bringen */ }
     }
 
