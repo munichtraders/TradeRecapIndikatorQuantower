@@ -90,13 +90,19 @@ public class TradeRecapIndicator : Indicator
     // Fingerprints bereits verschickter Trades — Schutz gegen doppelte Zustellung
     private readonly HashSet<string> _sentTradeKeys = new();
 
-    private const string CurrentVersion = "260714";
+    private const string CurrentVersion = "260722";
 
     // 0 = unbekannt, 1 = verbunden, 2 = Fehler
     private volatile int _tgStatus;
 
     // null = aktuell, sonst neue Versionsnummer verfügbar
     private string? _updateVersion;
+
+    // Diagnose: wenn OnInit fehlschlägt, bleibt der Indikator sichtbar (statt vom
+    // Chart zu verschwinden) und zeigt den Fehler im Status-Panel statt geräuschlos zu sterben.
+    private bool _initFailed;
+    private string? _initErrorMessage;
+    private bool _updateErrorLogged;
 
     private static readonly Color _colorGold   = Color.FromArgb(255, 184, 150, 72);
     private static readonly Color _colorGreen  = Color.FromArgb(255, 34,  197, 94);
@@ -119,45 +125,74 @@ public class TradeRecapIndicator : Indicator
 
     protected override void OnInit()
     {
-        _initTime    = DateTime.UtcNow;
-        _dailyStats  = new DailyStats();
-        _positionTracker = new PositionTracker(_dailyStats);
-        _positionTracker.PositionClosed += OnPositionClosed;
+        // Alles in try/catch: eine unbehandelte Exception hier führt dazu, dass
+        // Quantower den Indikator kommentarlos vom Chart entfernt. Lieber den Fehler
+        // fangen, ins Quantower-Log schreiben und im Status-Panel sichtbar machen.
+        try
+        {
+            _initTime    = DateTime.UtcNow;
+            _dailyStats  = new DailyStats();
+            _positionTracker = new PositionTracker(_dailyStats);
+            _positionTracker.PositionClosed += OnPositionClosed;
 
-        // HttpClient einmalig erstellen (Socket-Exhaustion vermeiden)
-        _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            // HttpClient einmalig erstellen (Socket-Exhaustion vermeiden)
+            _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 
-        _logoBytes = TryLoadLogo(LogoPath);
+            _logoBytes = TryLoadLogo(LogoPath);
 
-        if (!string.IsNullOrWhiteSpace(CsvPath))
-            _csvWriter.Initialize(CsvPath);
+            if (!string.IsNullOrWhiteSpace(CsvPath))
+                _csvWriter.Initialize(CsvPath);
 
-        Core.Instance.TradeAdded += OnTradeAdded;
+            Core.Instance.TradeAdded += OnTradeAdded;
 
-        // Sofort und dann alle 60s Telegram-Verbindung prüfen
-        _ = CheckTelegramAsync();
-        _connectionTimer = new System.Timers.Timer(60_000) { AutoReset = true };
-        _connectionTimer.Elapsed += (_, _) => _ = CheckTelegramAsync();
-        _connectionTimer.Start();
+            // Sofort und dann alle 60s Telegram-Verbindung prüfen
+            _ = CheckTelegramAsync();
+            _connectionTimer = new System.Timers.Timer(60_000) { AutoReset = true };
+            _connectionTimer.Elapsed += (_, _) => _ = CheckTelegramAsync();
+            _connectionTimer.Start();
 
-        _ = CheckVersionAsync();
+            _ = CheckVersionAsync();
+
+            LogInfo($"OnInit OK — Version {CurrentVersion}, Symbol {Symbol?.Name ?? "?"}");
+        }
+        catch (Exception ex)
+        {
+            _initFailed = true;
+            _initErrorMessage = ex.Message;
+            LogError(ex, "OnInit fehlgeschlagen");
+        }
     }
 
     // ── Preis-/Tick-Updates (MAE/MFE-Tracking + Trade-Tag-Sync) ──────────
 
     protected override void OnUpdate(UpdateArgs args)
     {
-        // Läuft bei jedem OnUpdate mit, damit das zuletzt eingetragene Trade-Tag
-        // spätestens beim nächsten Fill übernommen wird (kein Property-Setter verfügbar).
-        _positionTracker?.SetPendingTag(TradeTag);
+        // Läuft bei JEDEM Tick — ungefangene Exceptions hier sind der wahrscheinlichste
+        // Weg, wie ein Indikator in einer Endlosschleife crasht und vom Chart fliegt.
+        try
+        {
+            // Läuft bei jedem OnUpdate mit, damit das zuletzt eingetragene Trade-Tag
+            // spätestens beim nächsten Fill übernommen wird (kein Property-Setter verfügbar).
+            _positionTracker?.SetPendingTag(TradeTag);
 
-        if (args.Reason != UpdateReason.NewTick) return;
-        if (_positionTracker?.IsPositionOpen != true) return;
+            if (args.Reason != UpdateReason.NewTick) return;
+            if (_positionTracker?.IsPositionOpen != true) return;
 
-        double price = Symbol?.Last ?? double.NaN;
-        if (double.IsNaN(price)) price = Symbol?.Bid ?? double.NaN;
-        if (!double.IsNaN(price))
-            _positionTracker.UpdateMAEMFEFromTick((decimal)price);
+            double price = Symbol?.Last ?? double.NaN;
+            if (double.IsNaN(price)) price = Symbol?.Bid ?? double.NaN;
+            if (!double.IsNaN(price))
+                _positionTracker.UpdateMAEMFEFromTick((decimal)price);
+        }
+        catch (Exception ex)
+        {
+            // Nur einmal loggen — sonst flutet ein dauerhafter Fehler das Quantower-Log
+            // mit hunderten Einträgen pro Sekunde.
+            if (!_updateErrorLogged)
+            {
+                _updateErrorLogged = true;
+                LogError(ex, "OnUpdate Fehler (wird nur einmal geloggt)");
+            }
+        }
     }
 
     // ── Trade-Erkennung ───────────────────────────────────────────────────
@@ -288,7 +323,7 @@ public class TradeRecapIndicator : Indicator
         const int PadY  = 6;
         bool hasUpdate  = _updateVersion != null;
         int  PanelW     = 240;
-        int  lines      = hasUpdate ? 3 : 2;
+        int  lines      = (hasUpdate ? 3 : 2) + (_initFailed ? 1 : 0);
         int  PanelH     = LineH * lines + PadY * 2;
 
         if (clip.Width < 100) return;
@@ -300,6 +335,13 @@ public class TradeRecapIndicator : Indicator
         var bgRect     = new Rectangle(panX, panY + 2, PanelW, PanelH - 2);
         using (var goldBrush = new SolidBrush(_colorGold)) g.FillRectangle(goldBrush, accentRect);
         using (var bgBrush   = new SolidBrush(_colorBg))   g.FillRectangle(bgBrush, bgRect);
+
+        if (_initFailed)
+        {
+            using var b = new SolidBrush(_colorRed);
+            g.DrawString($"INIT FEHLER: {_initErrorMessage}", _statusFont, b, panX + PadX, panY + PadY);
+            panY += LineH;
+        }
 
         // Zeile 1 — Telegram-Status
         string tgText;
@@ -460,16 +502,42 @@ public class TradeRecapIndicator : Indicator
 
     protected override void OnClear()
     {
-        Core.Instance.TradeAdded -= OnTradeAdded;
-        if (_positionTracker != null)
-            _positionTracker.PositionClosed -= OnPositionClosed;
+        // Zeigt im Quantower-Log, WANN und OB der Indikator sauber entladen wurde —
+        // fehlt dieser Eintrag vor einem Verschwinden, war es ein harter Crash statt
+        // einer regulären Entfernung (Chart geschlossen, Indikator gelöscht, Neuladen).
+        LogInfo("OnClear aufgerufen — Indikator wird entladen");
 
-        _connectionTimer?.Stop();
-        _connectionTimer?.Dispose();
-        _connectionTimer = null;
+        try
+        {
+            Core.Instance.TradeAdded -= OnTradeAdded;
+            if (_positionTracker != null)
+                _positionTracker.PositionClosed -= OnPositionClosed;
 
-        _httpClient?.Dispose();
+            _connectionTimer?.Stop();
+            _connectionTimer?.Dispose();
+            _connectionTimer = null;
+
+            _httpClient?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            LogError(ex, "OnClear Fehler beim Aufräumen");
+        }
 
         base.OnClear();
+    }
+
+    // ── Quantower-natives Logging (sichtbar im Quantower-Log-Panel) ───────
+
+    private static void LogInfo(string message)
+    {
+        try { Core.Instance?.Loggers?.Log($"[TradeRecap] {message}", LoggingLevel.System); }
+        catch { /* Logging darf den Indikator nie zum Absturz bringen */ }
+    }
+
+    private static void LogError(Exception ex, string message)
+    {
+        try { Core.Instance?.Loggers?.Log(ex, $"[TradeRecap] {message}", LoggingLevel.Error); }
+        catch { /* Logging darf den Indikator nie zum Absturz bringen */ }
     }
 }

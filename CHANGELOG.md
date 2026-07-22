@@ -4,6 +4,15 @@ Alle Änderungen werden hier dokumentiert. Format: `YYMMDD`.
 
 ---
 
+## [260722] — 2026-07-22
+
+### Fix
+- **Diagnose für "Indikator verschwindet automatisch beim Neuladen".** `OnInit` und `OnUpdate` waren nicht gegen unbehandelte Exceptions abgesichert — ein Fehler dort führt dazu, dass Quantower den Indikator kommentarlos vom Chart entfernt, ohne dass irgendwo sichtbar wird warum. `OnUpdate` läuft bei JEDEM Tick und war der wahrscheinlichste Auslöser.
+- Beide Methoden sind jetzt in try/catch gekapselt: bei einem Fehler bleibt der Indikator auf dem Chart sichtbar (statt zu verschwinden) und zeigt "INIT FEHLER: ..." im Status-Panel an.
+- Neu: Logging über die native Quantower-API (`Core.Instance.Loggers`) statt einer eigenen Log-Datei — taucht direkt im Quantower-Log-Panel auf. Geloggt werden: erfolgreicher `OnInit`-Abschluss (mit Version + Symbol), `OnInit`-Fehler (mit Exception), `OnUpdate`-Fehler (nur der erste, um das Log nicht zu fluten) und jeder `OnClear`-Aufruf (zeigt, ob/wann der Indikator sauber entladen wurde — fehlt dieser Eintrag vor einem Verschwinden, war es ein harter Crash statt einer regulären Entfernung).
+
+---
+
 ## [260714] — 2026-07-14
 
 ### Neu
