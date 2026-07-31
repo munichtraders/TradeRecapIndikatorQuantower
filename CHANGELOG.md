@@ -1,6 +1,20 @@
 # Changelog
 
-Alle Änderungen werden hier dokumentiert. Format: `YYMMDD`.
+Alle Änderungen werden hier dokumentiert. Format ab `[20260731]`: `YYYYMMDD` (siehe Hinweis dort zum Formatwechsel). Ältere Einträge: `YYMMDD`, teils mit angehängter Revisionsziffer für mehrere Releases am selben Tag.
+
+---
+
+## [20260731] — 2026-07-31
+
+### Neu — Port der ATAS-Fixes vom selben Tag
+- **Scale-In/Scale-Out sichtbar im MiniChart:** Jeder Nachkauf (Scale-In) und jeder Teilverkauf (Scale-Out) innerhalb eines Trades bekommt jetzt einen eigenen Pfeil im generierten Mini-Chart — kleiner (26px statt 44px) und transparenter (~47% Deckkraft) als die Haupt-Entry-/Exit-Pfeile, positioniert am tatsächlichen Fill-Preis/-Zeitpunkt. Mehrere Fills im selben Balken werden per kleinem Rechts-Versatz auseinandergezogen.
+- **Fill-Aufschlüsselung in der Telegram-Caption:** Bei Trades mit mehr als einem Open- oder Close-Fill zeigt die Caption zusätzlich eine `Fills:`-Zeile.
+- **Entry/Exit zeigen jetzt den tatsächlichen Fill-Preis statt Ø:** `Entry:`/`Exit:` (Caption), die `ENTRY`/`EXIT`-Linien+Haupt-Pfeile (MiniChart) und die `EINSTIEG`/`AUSSTIEG`-Felder (Karte) zeigten bisher den mengengewichteten Durchschnittspreis statt des Preises, wo der Trade tatsächlich begann/endete. Jetzt zeigen alle drei Stellen den echten ersten Open-Fill- bzw. letzten Close-Fill-Preis; die Caption ergänzt bei mehreren Fills zusätzlich den Ø-Preis in Klammern.
+- `MiniChartRenderer.cs` und `CardRenderer.cs` sind nach diesem Fix wieder 1:1-identisch mit der ATAS-Version; `TelegramSender.cs` unterscheidet sich weiterhin bewusst nur in der `Task<string?>`-Fehlerrückgabe von `SendPhotoAsync` (Quantower-Logging-Anbindung aus `[2607221]`).
+- Zugrunde liegende Trade-Erkennung (`PositionTracker`) brauchte keine Änderung — berechnete Scale-In/Scale-Out bereits vorher korrekt (mengengewichteter Ø-Entry/Ø-Exit, korrekter Gesamt-PnL), siehe ATAS-Repo-Changelog `[260731]`/`[260802]`/`[260803]` für die volle Fehleranalyse.
+
+### Wichtig — Versionsschema-Wechsel auf `YYYYMMDD`
+Frühere Mehrfach-Releases am selben Tag hängten eine Revisionsziffer an (`260722` → `2607221` → `2607222`). Das bricht den Auto-Updater dauerhaft: `VersionChecker` vergleicht Versionen als reine Ganzzahl (`int.TryParse`, größer = neuer), und ein 7-stelliger Wert wie `2607222` ist als Zahl **größer** als jeder künftige korrekt formatierte 6-stellige `YYMMDD`-Wert (z. B. `260801` oder `261231`) — das hätte den Update-Check auf unbestimmte Zeit stillgelegt. Fix: ab sofort 8-stelliges `YYYYMMDD` (`20260731`), garantiert dauerhaft monoton steigend und zugleich größer als der zuletzt ausgelieferte Wert `2607222`.
 
 ---
 

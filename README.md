@@ -109,7 +109,7 @@ Siehe [CHANGELOG.md](CHANGELOG.md) — u. a. kein Auto-Installer, Tages-P&L rein
 
 ## Versionsschema
 
-Versionen folgen dem Format `YYMMDD` (z. B. `260714` = 14. Juli 2026).
+Versionen folgen ab `20260731` dem Format `YYYYMMDD` (z. B. `20260731` = 31. Juli 2026). Ältere Versionen nutzten `YYMMDD`, teils mit angehängter Revisionsziffer bei mehreren Releases am selben Tag — das brach die numerische Update-Prüfung dauerhaft, siehe [CHANGELOG.md](CHANGELOG.md) `[20260731]`.
 
 ---
 

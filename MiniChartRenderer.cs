@@ -25,6 +25,10 @@ public static class MiniChartRenderer
     private static readonly int ChartW = W - PadL - PadR;
     private static readonly int ChartH = H - PadT - PadB;
 
+    // Zusatz-Pfeile für Nachkauf/Teilverkauf: kleiner + transparenter als die Haupt-Pfeile (44px/opak)
+    private const float SecondaryArrowSize  = 26f;
+    private const int   SecondaryArrowAlpha = 120;
+
     private static Color Hex(string h)
     {
         h = h.TrimStart('#');
@@ -54,11 +58,16 @@ public static class MiniChartRenderer
 
         int n = candles.Count;
 
+        // Tatsächlicher Start-/Schluss-Fill des Trades (nicht der mengengewichtete
+        // Durchschnitt) — das ist der Preis, bei dem der Trader real ein-/ausgestiegen ist.
+        decimal actualEntryPrice = record.OpenFills.Count  > 0 ? record.OpenFills[0].Price       : record.AvgEntryPrice;
+        decimal actualExitPrice  = record.CloseFills.Count > 0 ? record.CloseFills[^1].Price      : record.AvgExitPrice;
+
         // ── Preisbereich ──────────────────────────────────────────────────
         decimal lo = candles.Min(c => c.Low);
         decimal hi = candles.Max(c => c.High);
-        lo = Math.Min(lo, Math.Min(record.AvgEntryPrice, record.AvgExitPrice));
-        hi = Math.Max(hi, Math.Max(record.AvgEntryPrice, record.AvgExitPrice));
+        lo = Math.Min(lo, Math.Min(actualEntryPrice, actualExitPrice));
+        hi = Math.Max(hi, Math.Max(actualEntryPrice, actualExitPrice));
         decimal range = hi - lo;
         if (range == 0) range = 1;
         decimal margin = range * 0.10m;
@@ -120,27 +129,61 @@ public static class MiniChartRenderer
         }
 
         // ── Entry / Exit Preislinien ──────────────────────────────────────
+        // Zeigen den tatsächlichen ersten/letzten Fill-Preis, nicht den Ø-Preis
+        // (der bleibt intern für die PnL-Berechnung maßgeblich).
         float entryLineX2 = entryIdx >= 0 ? BarX(entryIdx) : PadL + ChartW;
-        DrawHLine(g, PriceToY(record.AvgEntryPrice),
+        DrawHLine(g, PriceToY(actualEntryPrice),
             PadL, entryLineX2, Gold, Gold,
-            "ENTRY", $"{record.AvgEntryPrice:F2}");
+            "ENTRY", $"{actualEntryPrice:F2}");
 
         Color exitCol      = record.PnlUsd >= 0 ? Bull : Bear;
         Color exitLineGray = Color.FromArgb(180, 180, 180, 180);
         float exitX2 = PadL + ChartW;
         float exitX1 = Math.Max(PadL, exitX2 - 10f * candleAreaW);
-        DrawHLine(g, PriceToY(record.AvgExitPrice),
+        DrawHLine(g, PriceToY(actualExitPrice),
             exitX1, exitX2, exitLineGray, exitCol,
-            "EXIT", $"{record.AvgExitPrice:F2}");
+            "EXIT", $"{actualExitPrice:F2}");
 
         // ── Entry / Exit Marker-Pfeile (GDI+-Vektoren, keine externen Dateien) ──
         bool entryIsLong = record.Direction == PositionDirection.Long;
         if (entryIdx >= 0)
-            DrawArrowMarker(g, BarX(entryIdx), PriceToY(record.AvgEntryPrice),
+            DrawArrowMarker(g, BarX(entryIdx), PriceToY(actualEntryPrice),
                             pointUp: entryIsLong);
         if (exitIdx >= 0)
-            DrawArrowMarker(g, BarX(exitIdx), PriceToY(record.AvgExitPrice),
+            DrawArrowMarker(g, BarX(exitIdx), PriceToY(actualExitPrice),
                             pointUp: !entryIsLong);
+
+        // ── Zusatz-Pfeile für Nachkäufe (Scale-In) / Teilverkäufe (Scale-Out) ──
+        // Der erste Open-Fill und der letzte Close-Fill sind bereits durch die
+        // Haupt-Pfeile oben abgedeckt — hier nur die Zwischenschritte.
+        var arrowsPerBar = new Dictionary<int, int>();
+        if (entryIdx >= 0) arrowsPerBar[entryIdx] = 1;
+        if (exitIdx  >= 0) arrowsPerBar[exitIdx]  = arrowsPerBar.GetValueOrDefault(exitIdx) + 1;
+
+        float OffsetForBar(int idx)
+        {
+            int k = arrowsPerBar.GetValueOrDefault(idx);
+            arrowsPerBar[idx] = k + 1;
+            return BarX(idx) + k * 8f;
+        }
+
+        int SecondaryBarIdx(FillInfo f) =>
+            FindBarIndex(candles, DateTime.SpecifyKind(f.Time, DateTimeKind.Utc).ToLocalTime());
+
+        foreach (var f in record.OpenFills.Skip(1))
+        {
+            int idx = SecondaryBarIdx(f);
+            if (idx < 0) continue;
+            DrawArrowMarker(g, OffsetForBar(idx), PriceToY(f.Price), pointUp: entryIsLong,
+                            size: SecondaryArrowSize, alpha: SecondaryArrowAlpha);
+        }
+        foreach (var f in record.CloseFills.Take(Math.Max(0, record.CloseFills.Count - 1)))
+        {
+            int idx = SecondaryBarIdx(f);
+            if (idx < 0) continue;
+            DrawArrowMarker(g, OffsetForBar(idx), PriceToY(f.Price), pointUp: !entryIsLong,
+                            size: SecondaryArrowSize, alpha: SecondaryArrowAlpha);
+        }
 
         // ── Zeit-Labels (5 gleichmäßige Punkte) ──────────────────────────
         using var timeFont  = new Font("Calibri", 12f);
@@ -216,15 +259,16 @@ public static class MiniChartRenderer
     // Pfeil als GDI+-Vektor zeichnen — keine externen Dateien nötig.
     // pointUp=true → grüner ↑ (Long-Entry / Short-Exit), Spitze liegt auf y
     // pointUp=false → roter ↓ (Short-Entry / Long-Exit), Spitze liegt auf y
-    private static void DrawArrowMarker(Graphics g, float x, float y, bool pointUp)
+    private static void DrawArrowMarker(Graphics g, float x, float y, bool pointUp,
+                                         float size = 44f, int alpha = 255)
     {
-        const float size   = 44f;  // Gesamthöhe in Pixel, fix unabhängig vom Zoom
-        const float headH  = size * 0.55f;
-        const float shaftW = size * 0.38f;
+        // size: Gesamthöhe in Pixel, fix unabhängig vom Zoom
+        float headH  = size * 0.55f;
+        float shaftW = size * 0.38f;
 
         Color col = pointUp
-            ? Color.FromArgb(255, 52, 199, 89)   // grün  ↑
-            : Color.FromArgb(255, 220, 50,  50);  // rot   ↓
+            ? Color.FromArgb(alpha, 52, 199, 89)   // grün  ↑
+            : Color.FromArgb(alpha, 220, 50,  50);  // rot   ↓
 
         using var path  = new GraphicsPath();
         using var brush = new SolidBrush(col);
