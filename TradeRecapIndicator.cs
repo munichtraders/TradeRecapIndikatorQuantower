@@ -92,7 +92,7 @@ public class TradeRecapIndicator : Indicator
 
     // Drittes Release am 2026-07-22 — VersionChecker vergleicht als int (r > c),
     // deshalb Ziffernanhang statt Buchstabensuffix, um YYMMDD-Schema kompatibel zu halten.
-    private const string CurrentVersion = "20260731";
+    private const string CurrentVersion = "20260805";
 
     // 0 = unbekannt, 1 = verbunden, 2 = Fehler
     private volatile int _tgStatus;

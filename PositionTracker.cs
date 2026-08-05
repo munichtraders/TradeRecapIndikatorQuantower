@@ -22,6 +22,10 @@ public class PositionRecord
     public decimal PnlUsd { get; set; }
     public decimal MAE { get; set; }
     public decimal MFE { get; set; }
+    // Kontraktgewichtetes Exposure (Punkte * tatsächlich offene Kontrakte zum jeweiligen Tick) —
+    // TickCost-unabhängig, damit auch vor dem Fallback im Indikator korrekt getrackt werden kann.
+    public decimal MAEExposure { get; set; }
+    public decimal MFEExposure { get; set; }
     public string TradeTag { get; set; } = "";
     public string AccountId { get; set; } = "";
     // Tick-Daten aus Symbol beim ersten Fill — 0 bedeutet unbekannt (Fallback greift)
@@ -34,11 +38,12 @@ public class PositionRecord
     public long MAETicks  => TickSize > 0 ? (long)Math.Round(MAE / TickSize) : (long)MAE;
     public long MFETicks  => TickSize > 0 ? (long)Math.Round(MFE / TickSize) : (long)MFE;
 
-    // USD-Werte für MAE/MFE (gleiche Formel wie PnlUsd)
+    // USD-Werte für MAE/MFE — basieren auf MAEExposure/MFEExposure, also der tatsächlich
+    // offenen Kontraktzahl zum Zeitpunkt des jeweiligen Extrempunkts (nicht der finalen Gesamtgröße).
     public decimal MAEUsd => TickSize > 0 && TickCost > 0
-        ? MAE / TickSize * TickCost * Contracts : 0m;
+        ? MAEExposure / TickSize * TickCost : 0m;
     public decimal MFEUsd => TickSize > 0 && TickCost > 0
-        ? MFE / TickSize * TickCost * Contracts : 0m;
+        ? MFEExposure / TickSize * TickCost : 0m;
 
 
     public int OpenQty => OpenFills.Sum(f => f.Qty);
@@ -144,6 +149,8 @@ public class PositionTracker
                 OpenTime  = fill.Time,
                 MAE       = 0,
                 MFE       = 0,
+                MAEExposure = 0,
+                MFEExposure = 0,
                 TradeTag  = _pendingTag,
                 AccountId = trade.Account?.Id ?? "",
                 TickSize  = tickSize,
@@ -184,6 +191,8 @@ public class PositionTracker
                     OpenTime = fill.Time,
                     MAE = 0,
                     MFE = 0,
+                    MAEExposure = 0,
+                    MFEExposure = 0,
                     TradeTag = _pendingTag
                 };
                 flipped.OpenFills.Add(fill with { Qty = excess });
@@ -225,11 +234,26 @@ public class PositionTracker
     {
         if (_active == null) return;
 
+        // Nur die zu diesem Zeitpunkt tatsächlich offene Größe zählt — nicht die finale
+        // Gesamtgröße des Trades (die evtl. erst durch spätere Scale-Ins erreicht wird).
+        int openQtyNow = _active.OpenQty - _active.CloseQty;
+        if (openQtyNow <= 0) return;
+
         decimal move = _active.Direction == PositionDirection.Long
             ? price - _active.AvgEntryPrice
             : _active.AvgEntryPrice - price;
 
-        if (move < _active.MAE) _active.MAE = move;   // negativer = weiter gegen dich
-        if (move > _active.MFE) _active.MFE = move;   // positiver = weiter in deine Richtung
+        decimal exposure = move * openQtyNow;   // kontraktgewichteter Punkte-Exposure zu diesem Tick
+
+        if (exposure < _active.MAEExposure)   // negativer = weiter gegen dich
+        {
+            _active.MAEExposure = exposure;
+            _active.MAE = move;
+        }
+        if (exposure > _active.MFEExposure)   // positiver = weiter in deine Richtung
+        {
+            _active.MFEExposure = exposure;
+            _active.MFE = move;
+        }
     }
 }

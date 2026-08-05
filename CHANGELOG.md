@@ -4,6 +4,15 @@ Alle Änderungen werden hier dokumentiert. Format ab `[20260731]`: `YYYYMMDD` (s
 
 ---
 
+## [20260805] — 2026-08-05
+
+### Fix — MAE/MFE-USD berücksichtigt jetzt tatsächlich offene Größe statt finaler Gesamtgröße
+- **Problem:** `MAEUsd`/`MFEUsd` ("Min/Max Ticks · $" auf der Karte) multiplizierten die maximale Preis-Exkursion (in Ticks) immer mit der **finalen Gesamt-Kontraktzahl** des Trades (`record.Contracts`, gesetzt bei Close = Summe aller Open-Fills). War der Preis-Extrempunkt zu einem Zeitpunkt erreicht, an dem noch nicht alle Kontrakte aufgebaut waren (z. B. Scale-In später) oder bereits ein Teil geschlossen war (Scale-Out vorher), zeigte die Karte einen zu hohen theoretischen Betrag — so als wäre die volle Positionsgröße die ganze Zeit aktiv gewesen.
+- **Fix:** `PositionTracker.UpdateMAEMFEFromTick` trackt jetzt bei jedem Tick das kontraktgewichtete Exposure (`Preis-Bewegung × tatsächlich offene Kontrakte zu diesem Zeitpunkt`, neue Felder `MAEExposure`/`MFEExposure`) statt nur die reine Preis-Distanz. `MAEUsd`/`MFEUsd` leiten sich jetzt aus diesem Exposure ab — `MAE`/`MFE` (Punkte) und damit `MAETicks`/`MFETicks` beziehen sich jetzt auf denselben Zeitpunkt wie der USD-Wert (den tatsächlichen Tiefst-/Höchststand des offenen Positionswerts), nicht mehr auf die global größte Preisbewegung unabhängig von der Positionsgröße.
+- Betrifft `PositionTracker.cs`; `CardRenderer.cs`, `TelegramSender.cs`, `TradeRecapServerSender.cs`, `CsvJournalWriter.cs` unverändert (nutzen weiterhin dieselben Property-Namen).
+
+---
+
 ## [20260731] — 2026-07-31
 
 ### Neu — Port der ATAS-Fixes vom selben Tag
