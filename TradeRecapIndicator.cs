@@ -92,7 +92,7 @@ public class TradeRecapIndicator : Indicator
 
     // Drittes Release am 2026-07-22 — VersionChecker vergleicht als int (r > c),
     // deshalb Ziffernanhang statt Buchstabensuffix, um YYMMDD-Schema kompatibel zu halten.
-    private const string CurrentVersion = "20260805";
+    private const string CurrentVersion = "20260820";
 
     // 0 = unbekannt, 1 = verbunden, 2 = Fehler
     private volatile int _tgStatus;
@@ -184,6 +184,14 @@ public class TradeRecapIndicator : Indicator
             if (double.IsNaN(price)) price = Symbol?.Bid ?? double.NaN;
             if (!double.IsNaN(price))
                 _positionTracker.UpdateMAEMFEFromTick((decimal)price);
+
+            // Sicherheitsnetz: Kerzen-High/Low der laufenden Kerze zusätzlich zum
+            // Live-Tick-Stream prüfen (siehe UpdateMAEMFEFromBar in PositionTracker.cs)
+            try
+            {
+                _positionTracker.UpdateMAEMFEFromBar((decimal)High(0), (decimal)Low(0), Time(0));
+            }
+            catch { /* Kerzendaten evtl. noch nicht verfügbar */ }
         }
         catch (Exception ex)
         {

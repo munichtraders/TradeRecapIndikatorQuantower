@@ -4,6 +4,15 @@ Alle Änderungen werden hier dokumentiert. Format ab `[20260731]`: `YYYYMMDD` (s
 
 ---
 
+## [20260820] — 2026-08-20
+
+### Fix — Min/Max Ticks verpassten schnelle Kursbewegungen
+- **Problem:** `MAE`/`MFE` ("Min/Max Ticks" auf der Karte) wurden ausschließlich aus dem Live-Tick-Stream berechnet (`OnUpdate`/`UpdateReason.NewTick`). Bei schnellen Bewegungen kann dieser Stream einzelne Ticks auslassen — der MiniChart (aus den regulären Kerzendaten) zeigte dann einen deutlich größeren Ausschlag, als die Karte als Min/Max Ticks auswies (in einem beobachteten Fall auf der ATAS-Version: ~14 Ticks angezeigt bei tatsächlich ~220 Ticks laut Kerzen-Docht; Fix 1:1 auf Quantower übertragen).
+- **Fix:** Neue Methode `PositionTracker.UpdateMAEMFEFromBar(high, low, barTime)` prüft zusätzlich bei jedem Tick `High(0)`/`Low(0)` der aktuell laufenden Kerze gegen den Einstiegspreis — die Kerzen-Engine der Plattform verpasst nie einen Preis, im Gegensatz zum Tick-Stream. Aufgerufen aus dem bestehenden `OnUpdate`/`NewTick`-Zweig direkt neben dem bisherigen Tick-Update.
+- Betrifft `PositionTracker.cs`, `TradeRecapIndicator.cs`.
+
+---
+
 ## [20260805] — 2026-08-05
 
 ### Fix — MAE/MFE-USD berücksichtigt jetzt tatsächlich offene Größe statt finaler Gesamtgröße
