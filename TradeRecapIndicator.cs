@@ -52,8 +52,14 @@ public class TradeRecapIndicator : Indicator
     [InputParameter("Design: Logo-Pfad (PNG)", 50)]
     public string LogoPath = "";
 
-    [InputParameter("Design: Trader-Name (z.B. @MunichTraders)", 51)]
-    public string TraderName = "";
+    // Fester Trader-Roster (nur Martin/Tobi/Mario nutzen den Indikator) statt Freitext —
+    // Variants-Liste macht daraus ein Dropdown im Settings-Dialog. Default für Tobi, da
+    // dies die Quantower-Version ist. Dient nur als Fallback, solange der Telegram-
+    // Sessioncheck (noch) nicht bestätigt wurde (siehe _sessionTraderName).
+    [InputParameter("Design: Trader-Name", 51, variants: new object[] { "Martin", "Tobi", "Mario" })]
+    public string TraderName = "Tobi";
+
+    private string? _sessionTraderName;
 
     // ── Aktiver Trade ─────────────────────────────────────────────────────
 
@@ -81,6 +87,13 @@ public class TradeRecapIndicator : Indicator
     private byte[]? _logoBytes;
     private System.Timers.Timer? _connectionTimer;
 
+    // Start-Fragebogen (Trader bestätigen, Zustandscheck, Bias) — läuft über einen
+    // eigenen Polling-Timer, siehe PollCheckinUpdatesAsync.
+    private readonly SessionCheckinFlow _checkinFlow = new();
+    private readonly TelegramUpdatePoller _checkinPoller = new();
+    private System.Timers.Timer? _checkinPollTimer;
+    private bool _checkinSaved; // verhindert Mehrfach-Speichern desselben abgeschlossenen Sessionchecks
+
     // Letzter bekannter Kontostand (aus dem Trade-Fill gelesen) — Fallback-Feld überschreibt nur wenn 0
     private decimal _lastAccountBalance;
 
@@ -92,7 +105,7 @@ public class TradeRecapIndicator : Indicator
 
     // Drittes Release am 2026-07-22 — VersionChecker vergleicht als int (r > c),
     // deshalb Ziffernanhang statt Buchstabensuffix, um YYMMDD-Schema kompatibel zu halten.
-    private const string CurrentVersion = "20260820";
+    private const string CurrentVersion = "20260826";
 
     // 0 = unbekannt, 1 = verbunden, 2 = Fehler
     private volatile int _tgStatus;
@@ -155,6 +168,13 @@ public class TradeRecapIndicator : Indicator
 
             _ = CheckVersionAsync();
 
+            // Start-Fragebogen anstoßen + alle 3s auf Antworten pollen (reines HTTP, keine
+            // Kerzendaten-Zugriffe — unproblematisch aus dem Timer-Thread, siehe CheckTelegramAsync).
+            _ = _checkinFlow.StartAsync(TraderName, BotToken, ChatId, _httpClient);
+            _checkinPollTimer = new System.Timers.Timer(3_000) { AutoReset = true };
+            _checkinPollTimer.Elapsed += (_, _) => _ = PollCheckinUpdatesAsync();
+            _checkinPollTimer.Start();
+
             Log($"OnInit OK — Version {CurrentVersion}, Symbol {Symbol?.Name ?? "?"}");
         }
         catch (Exception ex)
@@ -162,6 +182,39 @@ public class TradeRecapIndicator : Indicator
             _initFailed = true;
             _initErrorMessage = ex.Message;
             LogError(ex, "OnInit fehlgeschlagen");
+        }
+    }
+
+    private async Task PollCheckinUpdatesAsync()
+    {
+        try
+        {
+            var updates = await _checkinPoller.PollAsync(BotToken, _httpClient).ConfigureAwait(false);
+            if (updates.Count > 0)
+            {
+                string? error = await _checkinFlow.ProcessUpdatesAsync(updates, BotToken, ChatId, _httpClient).ConfigureAwait(false);
+                if (error != null)
+                    Log($"Sessioncheck-Antwort fehlgeschlagen: {error}", LoggingLevel.Error);
+            }
+
+            if (_checkinFlow.Result != null)
+            {
+                _sessionTraderName = _checkinFlow.Result.TraderName;
+
+                if (!_checkinSaved)
+                {
+                    _checkinSaved = true;
+                    _csvWriter.AppendCheckin(_checkinFlow.Result);
+                    string? serverError = await TradeRecapServerSender.SendCheckinAsync(ServerUrl, ServerToken, _checkinFlow.Result, _httpClient)
+                        .ConfigureAwait(false);
+                    if (serverError != null)
+                        Log($"Sessioncheck Server-Journal fehlgeschlagen: {serverError}", LoggingLevel.Error);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError(ex, "Sessioncheck-Polling Fehler");
         }
     }
 
@@ -284,7 +337,7 @@ public class TradeRecapIndicator : Indicator
         byte[]? logoSnap   = _logoBytes;
         string botToken    = BotToken;
         string chatId      = ChatId;
-        string traderName  = TraderName;
+        string traderName  = _sessionTraderName ?? TraderName;
         string serverUrl   = ServerUrl;
         string serverToken = ServerToken;
         // Kein Account-Realized-PnL-Feed verfügbar (anders als ATAS Portfolio-API) —
@@ -356,9 +409,10 @@ public class TradeRecapIndicator : Indicator
         const int LineH = 20;
         const int PadX  = 8;
         const int PadY  = 6;
-        bool hasUpdate  = _updateVersion != null;
-        int  PanelW     = 240;
-        int  lines      = (hasUpdate ? 3 : 2) + (_initFailed ? 1 : 0);
+        bool hasUpdate      = _updateVersion != null;
+        bool hasCheckinWarn = _checkinFlow.PendingAmpel is AmpelColor.Yellow or AmpelColor.Red;
+        int  PanelW     = hasCheckinWarn ? 320 : 240;
+        int  lines      = 2 + (hasUpdate ? 1 : 0) + (hasCheckinWarn ? 1 : 0) + (_initFailed ? 1 : 0);
         int  PanelH     = LineH * lines + PadY * 2;
 
         if (clip.Width < 100) return;
@@ -371,14 +425,16 @@ public class TradeRecapIndicator : Indicator
         using (var goldBrush = new SolidBrush(_colorGold)) g.FillRectangle(goldBrush, accentRect);
         using (var bgBrush   = new SolidBrush(_colorBg))   g.FillRectangle(bgBrush, bgRect);
 
+        int y = panY + PadY;
+
         if (_initFailed)
         {
             using var b = new SolidBrush(_colorRed);
-            g.DrawString($"INIT FEHLER: {_initErrorMessage}", _statusFont, b, panX + PadX, panY + PadY);
-            panY += LineH;
+            g.DrawString($"INIT FEHLER: {_initErrorMessage}", _statusFont, b, panX + PadX, y);
+            y += LineH;
         }
 
-        // Zeile 1 — Telegram-Status
+        // Zeile — Telegram-Status
         string tgText;
         Color  tgColor;
         switch (_tgStatus)
@@ -387,9 +443,10 @@ public class TradeRecapIndicator : Indicator
             case 2:  tgText = "TG  ERR  Token/ID prüfen";  tgColor = _colorRed;    break;
             default: tgText = "TG  ...  Prüfe Verbindung"; tgColor = _colorYellow; break;
         }
-        using (var b = new SolidBrush(tgColor)) g.DrawString(tgText, _statusFont, b, panX + PadX, panY + PadY);
+        using (var b = new SolidBrush(tgColor)) g.DrawString(tgText, _statusFont, b, panX + PadX, y);
+        y += LineH;
 
-        // Zeile 2 — Trade-Status
+        // Zeile — Trade-Status
         var active = _positionTracker?.ActiveRecord;
         string tradeText;
         Color  tradeColor;
@@ -405,13 +462,26 @@ public class TradeRecapIndicator : Indicator
             tradeColor = _colorMuted;
         }
         using (var b = new SolidBrush(tradeColor))
-            g.DrawString(tradeText, _statusFont, b, panX + PadX, panY + PadY + LineH);
+            g.DrawString(tradeText, _statusFont, b, panX + PadX, y);
+        y += LineH;
+
+        // Zeile (optional) — Sessioncheck-Warnung bei Gelb/Rot
+        if (hasCheckinWarn)
+        {
+            bool isRed = _checkinFlow.PendingAmpel == AmpelColor.Red;
+            string checkinText = isRed
+                ? "Kein Trading heute (Zustandscheck)"
+                : "Risiko halbieren (Zustandscheck)";
+            using var b = new SolidBrush(isRed ? _colorRed : _colorYellow);
+            g.DrawString(checkinText, _statusFont, b, panX + PadX, y);
+            y += LineH;
+        }
 
         if (hasUpdate)
         {
             string updateLine = $"Update v{_updateVersion} verfügbar";
             using var b = new SolidBrush(_colorYellow);
-            g.DrawString(updateLine, _statusFont, b, panX + PadX, panY + PadY + LineH * 2);
+            g.DrawString(updateLine, _statusFont, b, panX + PadX, y);
         }
     }
 
@@ -551,6 +621,10 @@ public class TradeRecapIndicator : Indicator
             _connectionTimer?.Stop();
             _connectionTimer?.Dispose();
             _connectionTimer = null;
+
+            _checkinPollTimer?.Stop();
+            _checkinPollTimer?.Dispose();
+            _checkinPollTimer = null;
 
             _httpClient?.Dispose();
         }

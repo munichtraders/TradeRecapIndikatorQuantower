@@ -1,6 +1,11 @@
 using System.Net.Http;
+using System.Text;
+using System.Text.Json;
 
 namespace MunichTraders.TradeRecap;
+
+/// <summary>Ein Button für ein Telegram-Inline-Keyboard.</summary>
+public readonly record struct TelegramButton(string Label, string CallbackData);
 
 public static class TelegramSender
 {
@@ -44,6 +49,143 @@ public static class TelegramSender
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[TradeRecap] Telegram Exception: {ex.Message}");
+            return ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// Sendet eine Textnachricht mit Inline-Keyboard (für den Start-Fragebogen). Gibt bei
+    /// Erfolg die message_id der gesendeten Nachricht zurück (der Aufrufer braucht sie, um
+    /// einen späteren Button-Tap eindeutig diesem Schritt zuzuordnen), sonst eine
+    /// Fehlerbeschreibung als zweiten Wert.
+    /// </summary>
+    public static async Task<(long? MessageId, string? Error)> SendMessageWithKeyboardAsync(
+        string botToken,
+        string chatId,
+        string text,
+        IReadOnlyList<TelegramButton> buttons,
+        HttpClient client,
+        int buttonsPerRow = 1)
+    {
+        if (string.IsNullOrWhiteSpace(botToken) || string.IsNullOrWhiteSpace(chatId))
+            return (null, "Bot Token oder Chat ID nicht gesetzt");
+
+        string url = $"{ApiBase}{botToken}/sendMessage";
+
+        var payload = new Dictionary<string, object>
+        {
+            ["chat_id"] = chatId,
+            ["text"] = text,
+            ["parse_mode"] = "HTML",
+            ["reply_markup"] = BuildInlineKeyboard(buttons, buttonsPerRow),
+        };
+
+        try
+        {
+            string json = JsonSerializer.Serialize(payload);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var response = await client.PostAsync(url, content).ConfigureAwait(false);
+            string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+                return (null, $"HTTP {(int)response.StatusCode}: {body}");
+
+            using var doc = JsonDocument.Parse(body);
+            long messageId = doc.RootElement.GetProperty("result").GetProperty("message_id").GetInt64();
+            return (messageId, null);
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Bearbeitet eine bereits gesendete Nachricht (Text + Keyboard) statt eine neue zu
+    /// senden — hält den Start-Fragebogen als EINE Nachricht, die sich pro Schritt
+    /// aktualisiert, statt den Chat mit 4 Einzelnachrichten vollzuschreiben. Leere
+    /// Buttons-Liste entfernt das Keyboard (für die Abschluss-Zusammenfassung).
+    /// </summary>
+    public static async Task<string?> EditMessageWithKeyboardAsync(
+        string botToken,
+        string chatId,
+        long messageId,
+        string text,
+        IReadOnlyList<TelegramButton> buttons,
+        HttpClient client,
+        int buttonsPerRow = 1)
+    {
+        if (string.IsNullOrWhiteSpace(botToken) || string.IsNullOrWhiteSpace(chatId))
+            return "Bot Token oder Chat ID nicht gesetzt";
+
+        string url = $"{ApiBase}{botToken}/editMessageText";
+
+        var payload = new Dictionary<string, object>
+        {
+            ["chat_id"] = chatId,
+            ["message_id"] = messageId,
+            ["text"] = text,
+            ["parse_mode"] = "HTML",
+            ["reply_markup"] = BuildInlineKeyboard(buttons, buttonsPerRow),
+        };
+
+        try
+        {
+            string json = JsonSerializer.Serialize(payload);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var response = await client.PostAsync(url, content).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return $"HTTP {(int)response.StatusCode}: {body}";
+            }
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    private static Dictionary<string, object> BuildInlineKeyboard(IReadOnlyList<TelegramButton> buttons, int buttonsPerRow)
+    {
+        var rows = new List<object>();
+        for (int i = 0; i < buttons.Count; i += buttonsPerRow)
+        {
+            var row = buttons.Skip(i).Take(buttonsPerRow)
+                .Select(b => new Dictionary<string, object> { ["text"] = b.Label, ["callback_data"] = b.CallbackData })
+                .ToArray();
+            rows.Add(row);
+        }
+        return new Dictionary<string, object> { ["inline_keyboard"] = rows };
+    }
+
+    /// <summary>
+    /// Pflicht-Call nach jedem Button-Tap, sonst bleibt der Ladeindikator am Button in
+    /// Telegram hängen. Rein informativ (kein Popup-Text nötig).
+    /// </summary>
+    public static async Task<string?> AnswerCallbackQueryAsync(string botToken, string callbackQueryId, HttpClient client)
+    {
+        if (string.IsNullOrWhiteSpace(botToken) || string.IsNullOrWhiteSpace(callbackQueryId))
+            return "Bot Token oder callback_query_id fehlt";
+
+        string url = $"{ApiBase}{botToken}/answerCallbackQuery";
+        try
+        {
+            using var content = new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("callback_query_id", callbackQueryId),
+            });
+            var response = await client.PostAsync(url, content).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                return $"HTTP {(int)response.StatusCode}: {body}";
+            }
+            return null;
+        }
+        catch (Exception ex)
+        {
             return ex.Message;
         }
     }

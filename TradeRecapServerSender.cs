@@ -78,4 +78,57 @@ internal static class TradeRecapServerSender
             return ex.Message;
         }
     }
+
+    /// <summary>
+    /// Sendet eine Sessioncheck-Antwort (Trader, Zustandscheck, Bias) an den zentralen
+    /// Server — eigener Endpunkt, von der Trade-URL abgeleitet (.../trade → .../checkin),
+    /// damit kein zusätzliches Settings-Feld nötig ist. Rückgabe: null bei Erfolg, sonst
+    /// eine Fehlerbeschreibung.
+    /// </summary>
+    internal static async Task<string?> SendCheckinAsync(
+        string serverUrl,
+        string authToken,
+        CheckinRecord record,
+        HttpClient client)
+    {
+        if (string.IsNullOrWhiteSpace(serverUrl) || string.IsNullOrWhiteSpace(authToken))
+            return "Server-URL oder Token nicht gesetzt";
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["TraderName"] = record.TraderName,
+            ["Date"]       = record.Timestamp.ToString("yyyy-MM-dd"),
+            ["Time"]       = record.Timestamp.ToString("HH:mm:ss"),
+            ["StateA"]     = record.StateA,
+            ["StateB"]     = record.StateB,
+            ["Ampel"]      = record.Ampel.ToString(),
+            ["Bias"]       = record.Bias,
+        };
+
+        try
+        {
+            string json = JsonSerializer.Serialize(payload);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using var req = new HttpRequestMessage(HttpMethod.Post, DeriveCheckinUrl(serverUrl)) { Content = content };
+            req.Headers.Add("X-Auth-Token", authToken);
+
+            var response = await client.SendAsync(req).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                string error = $"HTTP {(int)response.StatusCode}: {body}";
+                Console.Error.WriteLine($"[TradeRecap] Checkin-Server-Fehler {error}");
+                return error;
+            }
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[TradeRecap] Checkin-Server-Exception: {ex.Message}");
+            return ex.Message;
+        }
+    }
+
+    private static string DeriveCheckinUrl(string tradeUrl) =>
+        tradeUrl.Contains("/trade") ? tradeUrl.Replace("/trade", "/checkin") : tradeUrl.TrimEnd('/') + "/checkin";
 }
