@@ -1,10 +1,12 @@
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using System.Timers;
 using TradingPlatform.BusinessLayer;
+using TradingPlatform.BusinessLayer.Chart;
 
 namespace MunichTraders.TradeRecap;
 
@@ -88,11 +90,23 @@ public class TradeRecapIndicator : Indicator
     private System.Timers.Timer? _connectionTimer;
 
     // Start-Fragebogen (Trader bestätigen, Zustandscheck, Bias) — läuft über einen
-    // eigenen Polling-Timer, siehe PollCheckinUpdatesAsync.
+    // eigenen Polling-Timer, siehe PollCheckinUpdatesAsync. Läuft nur in der Instanz, die
+    // den Flow über CheckinGate beansprucht hat (siehe OnInit) — andere Instanzen
+    // übernehmen das Ergebnis passiv aus dem Gate.
     private readonly SessionCheckinFlow _checkinFlow = new();
     private readonly TelegramUpdatePoller _checkinPoller = new();
     private System.Timers.Timer? _checkinPollTimer;
+    private bool _ownsCheckinFlow;
     private bool _checkinSaved; // verhindert Mehrfach-Speichern desselben abgeschlossenen Sessionchecks
+    // Aktuell gültige Ampel-Warnung fürs Panel — unabhängig davon, ob sie aus dem eigenen
+    // Fragebogen, dem Cache (CheckinGate) oder einer anderen Instanz stammt.
+    private AmpelColor? _activeAmpel;
+
+    // Verhindert doppelte Trade-Verarbeitung, wenn derselbe Markt in mehreren Charts
+    // gleichzeitig offen ist (siehe MarketOwnerGate). Nur die Owner-Instanz verarbeitet Fills.
+    private readonly Guid _instanceId = Guid.NewGuid();
+    private string _symbol = "";
+    private bool _isMarketOwner = true;
 
     // Letzter bekannter Kontostand (aus dem Trade-Fill gelesen) — Fallback-Feld überschreibt nur wenn 0
     private decimal _lastAccountBalance;
@@ -105,7 +119,7 @@ public class TradeRecapIndicator : Indicator
 
     // Drittes Release am 2026-07-22 — VersionChecker vergleicht als int (r > c),
     // deshalb Ziffernanhang statt Buchstabensuffix, um YYMMDD-Schema kompatibel zu halten.
-    private const string CurrentVersion = "20260826";
+    private const string CurrentVersion = "20260916";
 
     // 0 = unbekannt, 1 = verbunden, 2 = Fehler
     private volatile int _tgStatus;
@@ -119,13 +133,37 @@ public class TradeRecapIndicator : Indicator
     private string? _initErrorMessage;
     private bool _updateErrorLogged;
 
-    private static readonly Color _colorGold   = Color.FromArgb(255, 184, 150, 72);
-    private static readonly Color _colorGreen  = Color.FromArgb(255, 34,  197, 94);
-    private static readonly Color _colorRed    = Color.FromArgb(255, 239, 68,  68);
-    private static readonly Color _colorYellow = Color.FromArgb(255, 245, 158, 11);
-    private static readonly Color _colorMuted  = Color.FromArgb(255, 120, 120, 120);
-    private static readonly Color _colorBg     = Color.FromArgb(210, 15,  15,  15);
+    private static readonly Color _colorGold      = Color.FromArgb(255, 184, 150, 72);
+    private static readonly Color _colorGreen     = Color.FromArgb(255, 34,  197, 94);
+    private static readonly Color _colorRed       = Color.FromArgb(255, 239, 68,  68);
+    private static readonly Color _colorYellow    = Color.FromArgb(255, 245, 158, 11);
+    private static readonly Color _colorMuted     = Color.FromArgb(255, 120, 120, 120);
+    private static readonly Color _colorBg        = Color.FromArgb(210, 15,  15,  15);
+    private static readonly Color _colorCardBg    = Color.FromArgb(238, 17,  16,  15);
+    private static readonly Color _colorBorder    = Color.FromArgb(255, 48,  43,  34);
+    private static readonly Color _colorAvatarBg  = Color.FromArgb(255, 28,  26,  22);
+    private static readonly Color _colorTextPrime = Color.FromArgb(255, 236, 232, 222);
+    private static readonly Color _colorTextMuted = Color.FromArgb(255, 152, 147, 138);
     private static readonly Font  _statusFont  = new("Calibri", 10f, GraphicsUnit.Pixel);
+    private static readonly Font  _titleFont   = new("Calibri", 12f, FontStyle.Bold, GraphicsUnit.Pixel);
+    private static readonly Font  _smallFont   = new("Calibri", 9f,  GraphicsUnit.Pixel);
+    private static readonly Font  _avatarFont  = new("Calibri", 11f, FontStyle.Bold, GraphicsUnit.Pixel);
+    private Image? _logoImage; // aus _logoBytes, lazy für den Avatar-Badge
+    private bool  _logoImageLoadAttempted;
+
+    // Frei verschiebbares Status-Panel: Drag auf die Kopfzeile, Klick auf den Pfeil klappt
+    // ein/aus. Position wird nur für die laufende Chart-Session gehalten (kein verifizierter
+    // Weg, ein Feld ohne [InputParameter] dauerhaft mit dem Chart-Template zu speichern —
+    // siehe CHANGELOG).
+    private int   _panelX = int.MinValue; // int.MinValue = noch nie verschoben -> Standardposition oben rechts
+    private int   _panelY = int.MinValue;
+    private bool  _panelCollapsed;
+    private bool  _isDraggingPanel;
+    private Point _dragMouseStart;
+    private Point _dragPanelStart;
+    private Rectangle _lastPanelRect;
+    private Rectangle _lastHeaderRect;
+    private Rectangle _lastChevronRect;
 
     // ── Konstruktor ───────────────────────────────────────────────────────
 
@@ -160,6 +198,18 @@ public class TradeRecapIndicator : Indicator
 
             Core.Instance.TradeAdded += OnTradeAdded;
 
+            if (CurrentChart != null)
+            {
+                CurrentChart.MouseDown += OnChartMouseDown;
+                CurrentChart.MouseMove += OnChartMouseMove;
+                CurrentChart.MouseUp   += OnChartMouseUp;
+            }
+
+            // Nur eine Instanz pro Symbol verarbeitet Trades — verhindert doppelte Recap-Karten,
+            // wenn derselbe Markt in mehreren Charts gleichzeitig offen ist.
+            _symbol = Symbol?.Id ?? Symbol?.Name ?? "";
+            _isMarketOwner = MarketOwnerGate.TryClaim(_symbol, _instanceId);
+
             // Sofort und dann alle 60s Telegram-Verbindung prüfen
             _ = CheckTelegramAsync();
             _connectionTimer = new System.Timers.Timer(60_000) { AutoReset = true };
@@ -168,14 +218,24 @@ public class TradeRecapIndicator : Indicator
 
             _ = CheckVersionAsync();
 
-            // Start-Fragebogen anstoßen + alle 3s auf Antworten pollen (reines HTTP, keine
-            // Kerzendaten-Zugriffe — unproblematisch aus dem Timer-Thread, siehe CheckTelegramAsync).
-            _ = _checkinFlow.StartAsync(TraderName, BotToken, ChatId, _httpClient);
+            // Start-Fragebogen nur anstoßen, wenn CheckinGate diese Instanz als Fragesteller
+            // beansprucht (kein aktuelles Ergebnis vorhanden, keine andere Instanz fragt gerade).
+            // Sonst läuft nur das 3s-Polling weiter, das ein Ergebnis aus dem Gate übernimmt.
+            _ownsCheckinFlow = CheckinGate.TryClaimFlow(out var cachedCheckin);
+            if (_ownsCheckinFlow)
+            {
+                _ = _checkinFlow.StartAsync(TraderName, BotToken, ChatId, _httpClient);
+            }
+            else if (cachedCheckin != null)
+            {
+                _sessionTraderName = cachedCheckin.TraderName;
+                _activeAmpel = cachedCheckin.Ampel is AmpelColor.Yellow or AmpelColor.Red ? cachedCheckin.Ampel : null;
+            }
             _checkinPollTimer = new System.Timers.Timer(3_000) { AutoReset = true };
             _checkinPollTimer.Elapsed += (_, _) => _ = PollCheckinUpdatesAsync();
             _checkinPollTimer.Start();
 
-            Log($"OnInit OK — Version {CurrentVersion}, Symbol {Symbol?.Name ?? "?"}");
+            Log($"OnInit OK — Version {CurrentVersion}, Symbol {Symbol?.Name ?? "?"}, MarketOwner={_isMarketOwner}, OwnsCheckinFlow={_ownsCheckinFlow}");
         }
         catch (Exception ex)
         {
@@ -189,26 +249,39 @@ public class TradeRecapIndicator : Indicator
     {
         try
         {
-            var updates = await _checkinPoller.PollAsync(BotToken, _httpClient).ConfigureAwait(false);
-            if (updates.Count > 0)
+            if (_ownsCheckinFlow)
             {
-                string? error = await _checkinFlow.ProcessUpdatesAsync(updates, BotToken, ChatId, _httpClient).ConfigureAwait(false);
-                if (error != null)
-                    Log($"Sessioncheck-Antwort fehlgeschlagen: {error}", LoggingLevel.Error);
-            }
+                var updates = await _checkinPoller.PollAsync(BotToken, _httpClient).ConfigureAwait(false);
+                if (updates.Count > 0)
+                {
+                    string? error = await _checkinFlow.ProcessUpdatesAsync(updates, BotToken, ChatId, _httpClient).ConfigureAwait(false);
+                    if (error != null)
+                        Log($"Sessioncheck-Antwort fehlgeschlagen: {error}", LoggingLevel.Error);
+                }
 
-            if (_checkinFlow.Result != null)
-            {
-                _sessionTraderName = _checkinFlow.Result.TraderName;
-
-                if (!_checkinSaved)
+                if (_checkinFlow.Result != null && !_checkinSaved)
                 {
                     _checkinSaved = true;
+                    _sessionTraderName = _checkinFlow.Result.TraderName;
+                    CheckinGate.Save(_checkinFlow.Result);
                     _csvWriter.AppendCheckin(_checkinFlow.Result);
                     string? serverError = await TradeRecapServerSender.SendCheckinAsync(ServerUrl, ServerToken, _checkinFlow.Result, _httpClient)
                         .ConfigureAwait(false);
                     if (serverError != null)
                         Log($"Sessioncheck Server-Journal fehlgeschlagen: {serverError}", LoggingLevel.Error);
+                }
+
+                _activeAmpel = _checkinFlow.PendingAmpel is AmpelColor.Yellow or AmpelColor.Red
+                    ? _checkinFlow.PendingAmpel : null;
+            }
+            else if (_sessionTraderName == null)
+            {
+                // Eigenes Ergebnis noch nicht übernommen — regelmäßig prüfen, ob die
+                // fragestellende Instanz (gleicher Prozess) inzwischen fertig ist.
+                if (CheckinGate.TryGetValid(out var record) && record != null)
+                {
+                    _sessionTraderName = record.TraderName;
+                    _activeAmpel = record.Ampel is AmpelColor.Yellow or AmpelColor.Red ? record.Ampel : null;
                 }
             }
         }
@@ -277,6 +350,10 @@ public class TradeRecapIndicator : Indicator
                 $"— SymbolMatch={symbolMatch}, AccountMatch={accountMatch} (Filter='{AccountIdFilter}', Trade-Account={trade.Account?.Id})");
 
             if (!symbolMatch || !accountMatch) return;
+
+            // Passive Instanz (gleicher Markt bereits in einem anderen Chart aktiv) verarbeitet
+            // keine Fills — siehe MarketOwnerGate.
+            if (!_isMarketOwner) return;
 
             if (trade.Account?.Balance is double bal && bal > 0)
                 _lastAccountBalance = (decimal)bal;
@@ -404,85 +481,212 @@ public class TradeRecapIndicator : Indicator
         }
     }
 
+    private readonly record struct StatusRow(Color Dot, string Text, Color TextColor);
+
     private void DrawStatusPanel(Graphics g, Rectangle clip)
     {
-        const int LineH = 20;
-        const int PadX  = 8;
-        const int PadY  = 6;
-        bool hasUpdate      = _updateVersion != null;
-        bool hasCheckinWarn = _checkinFlow.PendingAmpel is AmpelColor.Yellow or AmpelColor.Red;
-        int  PanelW     = hasCheckinWarn ? 320 : 240;
-        int  lines      = 2 + (hasUpdate ? 1 : 0) + (hasCheckinWarn ? 1 : 0) + (_initFailed ? 1 : 0);
-        int  PanelH     = LineH * lines + PadY * 2;
+        if (!_logoImageLoadAttempted)
+        {
+            _logoImageLoadAttempted = true;
+            _logoImage = TryLoadLogoImage(_logoBytes);
+        }
 
         if (clip.Width < 100) return;
 
-        int panX = clip.Right - PanelW - 12;
-        int panY = clip.Top   + 12;
+        const int PadX     = 10;
+        const int RowH     = 20;
+        const int HeaderH  = 36;
+        const int AccentH  = 3;
+        const int AvatarSz = 24;
+        const int Radius   = 10;
 
-        var accentRect = new Rectangle(panX, panY, PanelW, 2);
-        var bgRect     = new Rectangle(panX, panY + 2, PanelW, PanelH - 2);
-        using (var goldBrush = new SolidBrush(_colorGold)) g.FillRectangle(goldBrush, accentRect);
-        using (var bgBrush   = new SolidBrush(_colorBg))   g.FillRectangle(bgBrush, bgRect);
-
-        int y = panY + PadY;
+        // ── Zeilen zusammenstellen ───────────────────────────────────────
+        var rows = new List<StatusRow>();
 
         if (_initFailed)
-        {
-            using var b = new SolidBrush(_colorRed);
-            g.DrawString($"INIT FEHLER: {_initErrorMessage}", _statusFont, b, panX + PadX, y);
-            y += LineH;
-        }
+            rows.Add(new StatusRow(_colorRed, $"INIT FEHLER: {_initErrorMessage}", _colorRed));
 
-        // Zeile — Telegram-Status
-        string tgText;
-        Color  tgColor;
-        switch (_tgStatus)
+        if (!_isMarketOwner)
         {
-            case 1:  tgText = "TG  OK  Verbunden";         tgColor = _colorGreen;  break;
-            case 2:  tgText = "TG  ERR  Token/ID prüfen";  tgColor = _colorRed;    break;
-            default: tgText = "TG  ...  Prüfe Verbindung"; tgColor = _colorYellow; break;
-        }
-        using (var b = new SolidBrush(tgColor)) g.DrawString(tgText, _statusFont, b, panX + PadX, y);
-        y += LineH;
-
-        // Zeile — Trade-Status
-        var active = _positionTracker?.ActiveRecord;
-        string tradeText;
-        Color  tradeColor;
-        if (active != null)
-        {
-            string dir = active.Direction == PositionDirection.Long ? "LONG" : "SHORT";
-            tradeText  = $"{dir}  {active.Contracts}K  @  {active.AvgEntryPrice:F2}";
-            tradeColor = _colorGold;
+            rows.Add(new StatusRow(_colorMuted, "Passiv – aktiv in anderem Chart", _colorTextMuted));
         }
         else
         {
-            tradeText  = "Kein Trade offen";
-            tradeColor = _colorMuted;
-        }
-        using (var b = new SolidBrush(tradeColor))
-            g.DrawString(tradeText, _statusFont, b, panX + PadX, y);
-        y += LineH;
+            (Color dot, string text) tg = _tgStatus switch
+            {
+                1 => (_colorGreen,  "Telegram verbunden"),
+                2 => (_colorRed,    "Telegram: Token/ID prüfen"),
+                _ => (_colorYellow, "Telegram: Verbindung wird geprüft"),
+            };
+            rows.Add(new StatusRow(tg.dot, tg.text, _colorTextPrime));
 
-        // Zeile (optional) — Sessioncheck-Warnung bei Gelb/Rot
-        if (hasCheckinWarn)
-        {
-            bool isRed = _checkinFlow.PendingAmpel == AmpelColor.Red;
-            string checkinText = isRed
-                ? "Kein Trading heute (Zustandscheck)"
-                : "Risiko halbieren (Zustandscheck)";
-            using var b = new SolidBrush(isRed ? _colorRed : _colorYellow);
-            g.DrawString(checkinText, _statusFont, b, panX + PadX, y);
-            y += LineH;
+            var active = _positionTracker?.ActiveRecord;
+            if (active != null)
+            {
+                string dir = active.Direction == PositionDirection.Long ? "LONG" : "SHORT";
+                rows.Add(new StatusRow(_colorGold,
+                    $"{dir}  {active.Contracts}K  @ {active.AvgEntryPrice:F2}", _colorTextPrime));
+            }
+            else
+            {
+                rows.Add(new StatusRow(_colorMuted, "Kein Trade offen", _colorTextMuted));
+            }
         }
 
-        if (hasUpdate)
+        if (_activeAmpel is AmpelColor.Yellow or AmpelColor.Red)
         {
-            string updateLine = $"Update v{_updateVersion} verfügbar";
-            using var b = new SolidBrush(_colorYellow);
-            g.DrawString(updateLine, _statusFont, b, panX + PadX, y);
+            bool isRed = _activeAmpel == AmpelColor.Red;
+            rows.Add(new StatusRow(
+                isRed ? _colorRed : _colorYellow,
+                isRed ? "Kein Trading heute (Zustandscheck)" : "Risiko halbieren (Zustandscheck)",
+                isRed ? _colorRed : _colorYellow));
         }
+
+        if (_updateVersion != null)
+            rows.Add(new StatusRow(_colorYellow, $"Update v{_updateVersion} verfügbar", _colorYellow));
+
+        // ── Geometrie ────────────────────────────────────────────────────
+        int maxTextLen = rows.Count == 0 ? 0 : rows.Max(r => r.Text.Length);
+        int panelW  = Math.Clamp(maxTextLen * 7 + 60, 230, 460);
+        int bodyH   = _panelCollapsed ? 0 : rows.Count * RowH + 8;
+        int footerH = _panelCollapsed ? 0 : 16;
+        int panelH  = HeaderH + bodyH + footerH;
+
+        int defaultX = clip.Right - panelW - 12;
+        int defaultY = clip.Top   + 12;
+        int panX = _panelX == int.MinValue ? defaultX : _panelX;
+        int panY = _panelY == int.MinValue ? defaultY : _panelY;
+        panX = Math.Max(clip.Left, Math.Min(panX, clip.Right  - 60));
+        panY = Math.Max(clip.Top,  Math.Min(panY, clip.Bottom - HeaderH));
+
+        _lastPanelRect  = new Rectangle(panX, panY, panelW, panelH);
+        _lastHeaderRect = new Rectangle(panX, panY, panelW, HeaderH);
+
+        // ── Karte ────────────────────────────────────────────────────────
+        using (var borderBrush = new SolidBrush(_colorBorder))
+        using (var borderPath  = RoundedRectPath(new Rectangle(panX - 1, panY - 1, panelW + 2, panelH + 2), Radius + 1))
+            g.FillPath(borderBrush, borderPath);
+        using (var cardBrush = new SolidBrush(_colorCardBg))
+        using (var cardPath  = RoundedRectPath(_lastPanelRect, Radius))
+            g.FillPath(cardBrush, cardPath);
+        using (var accentBrush = new SolidBrush(_colorGold))
+            g.FillRectangle(accentBrush, new Rectangle(panX, panY, panelW, AccentH));
+
+        // Avatar-Badge (Logo, sonst "MT"-Monogramm)
+        var avatarRect = new Rectangle(panX + PadX, panY + AccentH + (HeaderH - AccentH - AvatarSz) / 2, AvatarSz, AvatarSz);
+        using (var avatarBrush = new SolidBrush(_colorAvatarBg))
+        using (var avatarPath  = RoundedRectPath(avatarRect, AvatarSz / 2))
+            g.FillPath(avatarBrush, avatarPath);
+        if (_logoImage != null)
+        {
+            const int inset = 4;
+            g.DrawImage(_logoImage, new Rectangle(avatarRect.X + inset, avatarRect.Y + inset, AvatarSz - 2 * inset, AvatarSz - 2 * inset));
+        }
+        else
+        {
+            using var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            using var b   = new SolidBrush(_colorGold);
+            g.DrawString("MT", _avatarFont, b, avatarRect, fmt);
+        }
+
+        // Titel + Untertitel (Symbol + Aktiv-/Passiv-Status)
+        int textX = avatarRect.Right + 8;
+        using (var titleBrush = new SolidBrush(_colorTextPrime))
+            g.DrawString("Munich Traders", _titleFont, titleBrush, textX, panY + AccentH + 2);
+        string subtitle = string.IsNullOrEmpty(_symbol)
+            ? "Trade Recap"
+            : $"{Symbol?.Name ?? _symbol} · {(_isMarketOwner ? "aktiv" : "passiv")}";
+        using (var subBrush = new SolidBrush(_colorTextMuted))
+            g.DrawString(subtitle, _smallFont, subBrush, textX, panY + AccentH + 19);
+
+        // Einklapp-Pfeil oben rechts
+        int chevCx = panX + panelW - PadX - 6;
+        int chevCy = panY + HeaderH / 2;
+        _lastChevronRect = new Rectangle(chevCx - 10, chevCy - 10, 20, 20);
+        Point[] tri = _panelCollapsed
+            ? new[] { new Point(chevCx - 3, chevCy - 5), new Point(chevCx - 3, chevCy + 5), new Point(chevCx + 4, chevCy) }
+            : new[] { new Point(chevCx - 5, chevCy - 3), new Point(chevCx + 5, chevCy - 3), new Point(chevCx, chevCy + 4) };
+        using (var chevBrush = new SolidBrush(_colorTextMuted))
+            g.FillPolygon(chevBrush, tri);
+
+        if (_panelCollapsed) return;
+
+        using (var linePen = new Pen(_colorBorder))
+            g.DrawLine(linePen, panX + PadX, panY + HeaderH, panX + panelW - PadX, panY + HeaderH);
+
+        // ── Statuszeilen ─────────────────────────────────────────────────
+        int y = panY + HeaderH + 6;
+        foreach (var row in rows)
+        {
+            var dotRect = new Rectangle(panX + PadX, y + 6, 7, 7);
+            using (var dotBrush = new SolidBrush(row.Dot)) g.FillEllipse(dotBrush, dotRect);
+            using (var textBrush = new SolidBrush(row.TextColor))
+                g.DrawString(row.Text, _statusFont, textBrush, panX + PadX + 14, y);
+            y += RowH;
+        }
+
+        // ── Footer ───────────────────────────────────────────────────────
+        using (var linePen = new Pen(_colorBorder))
+            g.DrawLine(linePen, panX + PadX, y, panX + panelW - PadX, y);
+        using (var footerBrush = new SolidBrush(_colorTextMuted))
+            g.DrawString($"Munich Traders  ·  v{CurrentVersion}", _smallFont, footerBrush, panX + PadX, y + 2);
+    }
+
+    private static GraphicsPath RoundedRectPath(Rectangle rect, int radius)
+    {
+        int d = Math.Max(1, radius) * 2;
+        d = Math.Min(d, Math.Min(rect.Width, rect.Height));
+        var path = new GraphicsPath();
+        path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+        path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+        path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+        path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    private static Image? TryLoadLogoImage(byte[]? bytes)
+    {
+        if (bytes == null || bytes.Length == 0) return null;
+        try { return Image.FromStream(new MemoryStream(bytes)); }
+        catch { return null; }
+    }
+
+    // ── Panel-Interaktion (Drag & Einklappen) ────────────────────────────
+
+    private void OnChartMouseDown(object? sender, ChartMouseNativeEventArgs e)
+    {
+        if (_lastChevronRect.Contains(e.Location))
+        {
+            _panelCollapsed = !_panelCollapsed;
+            e.Handled = true;
+            CurrentChart?.RedrawBuffer();
+            return;
+        }
+        if (_lastHeaderRect.Contains(e.Location))
+        {
+            _isDraggingPanel = true;
+            _dragMouseStart  = e.Location;
+            _dragPanelStart  = new Point(_lastPanelRect.X, _lastPanelRect.Y);
+            e.Handled = true;
+            e.NeedMouseCapture = true;
+        }
+    }
+
+    private void OnChartMouseMove(object? sender, ChartMouseNativeEventArgs e)
+    {
+        if (!_isDraggingPanel) return;
+        _panelX = _dragPanelStart.X + (e.Location.X - _dragMouseStart.X);
+        _panelY = _dragPanelStart.Y + (e.Location.Y - _dragMouseStart.Y);
+        e.Handled   = true;
+        e.NeedRedraw = true;
+    }
+
+    private void OnChartMouseUp(object? sender, ChartMouseNativeEventArgs e)
+    {
+        if (!_isDraggingPanel) return;
+        _isDraggingPanel = false;
+        e.Handled = true;
     }
 
     // ── Hilfsmethoden ─────────────────────────────────────────────────────
@@ -618,6 +822,18 @@ public class TradeRecapIndicator : Indicator
             if (_positionTracker != null)
                 _positionTracker.PositionClosed -= OnPositionClosed;
 
+            if (CurrentChart != null)
+            {
+                CurrentChart.MouseDown -= OnChartMouseDown;
+                CurrentChart.MouseMove -= OnChartMouseMove;
+                CurrentChart.MouseUp   -= OnChartMouseUp;
+            }
+
+            if (_isMarketOwner)
+                MarketOwnerGate.Release(_symbol, _instanceId);
+            if (_ownsCheckinFlow)
+                CheckinGate.ReleaseFlow();
+
             _connectionTimer?.Stop();
             _connectionTimer?.Dispose();
             _connectionTimer = null;
@@ -627,6 +843,7 @@ public class TradeRecapIndicator : Indicator
             _checkinPollTimer = null;
 
             _httpClient?.Dispose();
+            _logoImage?.Dispose();
         }
         catch (Exception ex)
         {
